@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum GameStatus {
+  active
+  completed
+}
+
+enum TradeType {
+  buy
+  sell
+}
+
+enum TransactionType {
+  deposit
+  withdrawal
+}
+
+enum TransactionStatus {
+  pending
+  confirmed
+  failed
+}
+
+// Models
+model Profile {
+  id                String   @id @default(uuid()) @db.Uuid
+  wallet_address    String   @unique
+  username          String?  @unique
+  deposited_balance Decimal  @default(0) @db.Decimal(20, 9)
+  total_wagered     Decimal  @default(0) @db.Decimal(20, 9)
+  total_won         Decimal  @default(0) @db.Decimal(20, 9)
+  games_played      Int      @default(0)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  positions       PlayerPosition[]
+  trades          Trade[]
+  deposit_history DepositHistory[]
+  chat_messages   ChatMessage[]
+
+  @@map("profiles")
+}
+
+model GameRound {
+  id                 String     @id @default(uuid()) @db.Uuid
+  status             GameStatus @default(active)
+  started_at         DateTime   @default(now())
+  ended_at           DateTime?
+  duration_seconds   Int        @default(30)
+  pool_sol_balance   Decimal    @default(0) @db.Decimal(20, 9)
+  pool_token_supply  Decimal    @default(0) @db.Decimal(20, 9)
+  current_price      Decimal    @default(0) @db.Decimal(20, 9)
+
+  positions PlayerPosition[]
+  trades    Trade[]
+
+  @@map("game_rounds")
+}
+
+model PlayerPosition {
+  id            String    @id @default(uuid()) @db.Uuid
+  round_id      String    @db.Uuid
+  profile_id    String    @db.Uuid
+  token_balance Decimal   @default(0) @db.Decimal(20, 9)
+  total_sol_in  Decimal   @default(0) @db.Decimal(20, 9)
+  total_sol_out Decimal   @default(0) @db.Decimal(20, 9)
+
+  round   GameRound @relation(fields: [round_id], references: [id], onDelete: Cascade)
+  profile Profile   @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  @@unique([round_id, profile_id])
+  @@map("player_positions")
+}
+
+model Trade {
+  id             String    @id @default(uuid()) @db.Uuid
+  round_id       String    @db.Uuid
+  profile_id     String    @db.Uuid
+  trade_type     TradeType
+  sol_amount     Decimal   @db.Decimal(20, 9)
+  token_amount   Decimal   @db.Decimal(20, 9)
+  price_at_trade Decimal   @db.Decimal(20, 9)
+  fee_amount     Decimal   @default(0) @db.Decimal(20, 9)
+  created_at     DateTime  @default(now())
+
+  round   GameRound @relation(fields: [round_id], references: [id], onDelete: Cascade)
+  profile Profile   @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  @@map("trades")
+}
+
+model DepositHistory {
+  id           String            @id @default(uuid()) @db.Uuid
+  profile_id   String            @db.Uuid
+  tx_type      TransactionType
+  amount       Decimal           @db.Decimal(20, 9)
+  tx_signature String
+  status       TransactionStatus @default(pending)
+  created_at   DateTime          @default(now())
+
+  profile Profile @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  @@map("deposit_history")
+}
+
+model ChatMessage {
+  id         String   @id @default(uuid()) @db.Uuid
+  profile_id String?  @db.Uuid
+  username   String
+  message    String
+  room       String   @default("pumpit")
+  created_at DateTime @default(now())
+
+  profile Profile? @relation(fields: [profile_id], references: [id], onDelete: SetNull)
+
+  @@map("chat_messages")
+}
