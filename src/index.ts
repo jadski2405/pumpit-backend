@@ -78,7 +78,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    ws: `ws://localhost:${PORT}`,
+    uptime: process.uptime(),
     connections: wsStats
   });
 });
@@ -108,6 +108,13 @@ app.use('/api/deposit', depositRoutes);
 app.use('/api/withdraw', depositRoutes);
 app.use('/api/game', gameRoutes);
 app.use('/api/chat', chatRoutes);
+
+// Handle WebSocket upgrade - important for nginx/load balancer compatibility
+server.on('upgrade', (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
+});
 
 // WebSocket connection handling
 wss.on('connection', (ws, req) => {
@@ -158,7 +165,8 @@ process.on('SIGTERM', shutdown);
 // Start server
 server.listen(PORT, () => {
   console.log(`🚀 PumpIt server running on port ${PORT}`);
-  console.log(`📡 WebSocket server ready`);
+  console.log(`📡 WebSocket server ready on same port`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
   
   // Start round manager background job

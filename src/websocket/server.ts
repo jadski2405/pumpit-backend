@@ -28,9 +28,13 @@ let wss: WebSocketServer | null = null;
 
 /**
  * Initialize WebSocket server on existing HTTP server
+ * Uses noServer mode for proper nginx/load balancer compatibility
  */
 export function initializeWebSocket(server: Server): WebSocketServer {
-  wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({ 
+    noServer: true,
+    clientTracking: true
+  });
 
   // Setup heartbeat to detect dead connections
   const heartbeatInterval = setInterval(() => {
