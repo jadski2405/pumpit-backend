@@ -72,6 +72,7 @@ model PlayerPosition {
   token_balance Decimal   @default(0) @db.Decimal(20, 9)
   total_sol_in  Decimal   @default(0) @db.Decimal(20, 9)
   total_sol_out Decimal   @default(0) @db.Decimal(20, 9)
+  entry_price   Decimal?  @db.Decimal(20, 9)
 
   round   GameRound @relation(fields: [round_id], references: [id], onDelete: Cascade)
   profile Profile   @relation(fields: [profile_id], references: [id], onDelete: Cascade)

@@ -290,3 +290,62 @@ export function sendToWallet(walletAddress: string, event: object): void {
     sendToClient(client.ws, event);
   }
 }
+
+/**
+ * Broadcast final PnL to all players with positions in a round
+ * Called at round end to show final results
+ */
+export async function broadcastFinalPnL(
+  roundId: string,
+  finalPrice: number,
+  positions: Array<{
+    profile: { wallet_address: string };
+    token_balance: any;
+    total_sol_in: any;
+    total_sol_out: any;
+    entry_price: any;
+  }>
+): Promise<void> {
+  for (const position of positions) {
+    const tokenBalance = Number(position.token_balance);
+    const totalIn = Number(position.total_sol_in);
+    const totalOut = Number(position.total_sol_out);
+    const entryPrice = position.entry_price ? Number(position.entry_price) : null;
+    
+    // Calculate final value and PnL
+    const finalValue = tokenBalance * finalPrice;
+    const pnl = finalValue + totalOut - totalIn;
+    const pnlPercent = totalIn > 0 ? (pnl / totalIn) * 100 : 0;
+    
+    // Calculate unrealized PnL based on entry price (if available)
+    let unrealizedPnl = 0;
+    let unrealizedPnlPercent = 0;
+    if (entryPrice && tokenBalance > 0) {
+      unrealizedPnl = (finalPrice - entryPrice) * tokenBalance;
+      unrealizedPnlPercent = ((finalPrice - entryPrice) / entryPrice) * 100;
+    }
+    
+    // Send to the specific wallet
+    const client = getClientByWallet(position.profile.wallet_address);
+    if (client) {
+      sendToClient(client.ws, {
+        type: WS_EVENTS.POSITION_UPDATE,
+        position: {
+          round_id: roundId,
+          token_balance: tokenBalance,
+          total_sol_in: totalIn,
+          total_sol_out: totalOut,
+          current_value: finalValue,
+          entry_price: entryPrice,
+          current_price: finalPrice,
+          pnl: pnl,
+          pnl_percent: pnlPercent,
+          unrealized_pnl: unrealizedPnl,
+          unrealized_pnl_percent: unrealizedPnlPercent,
+          is_final: true
+        },
+        timestamp: Date.now()
+      });
+    }
+  }
+}

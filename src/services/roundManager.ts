@@ -17,6 +17,7 @@ import {
   broadcastTrade as wsBroadcastTrade,
   broadcastPriceUpdate as wsBroadcastPriceUpdate,
   sendForfeitureNotification,
+  broadcastFinalPnL,
   RoundBroadcast,
   TradeBroadcast
 } from '../websocket/broadcast';
@@ -125,13 +126,29 @@ async function checkAndManageRounds() {
 async function handleRoundEnd(round: RoundWithPositions) {
   console.log(`[RoundManager] Round ${round.id} has ended`);
 
+  // Get final price before ending
+  const finalPrice = Number(round.current_price);
+
+  // Get all positions with profile data for PnL broadcast
+  const positionsWithProfiles = await prisma.playerPosition.findMany({
+    where: { round_id: round.id },
+    include: {
+      profile: {
+        select: { wallet_address: true }
+      }
+    }
+  });
+
+  // Broadcast final PnL to all players with positions
+  await broadcastFinalPnL(round.id, finalPrice, positionsWithProfiles);
+
   // End the round and get forfeitures
   const { forfeitures } = await endRound(round.id);
 
   // Broadcast round ended
   broadcastRoundEnded(
     round.id,
-    Number(round.current_price),
+    finalPrice,
     Number(round.pool_sol_balance),
     forfeitures.map(f => ({
       profile_id: f.profileId,

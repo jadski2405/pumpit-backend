@@ -99,6 +99,31 @@ export async function executeBuy(
   const newPrice = getPrice(newPool);
   const priceMultiplier = getPriceMultiplier(newPool);
 
+  // Get existing position to calculate weighted average entry price
+  const existingPosition = await prisma.playerPosition.findUnique({
+    where: {
+      round_id_profile_id: {
+        round_id: roundId,
+        profile_id: profileId
+      }
+    }
+  });
+
+  // Calculate weighted average entry price
+  const tradePrice = newPrice;
+  let newEntryPrice: number;
+  
+  if (existingPosition && Number(existingPosition.token_balance) > 0 && existingPosition.entry_price) {
+    // Weighted average: (old_tokens * old_entry + new_tokens * trade_price) / total_tokens
+    const oldTokens = Number(existingPosition.token_balance);
+    const oldEntry = Number(existingPosition.entry_price);
+    const totalTokens = oldTokens + tokensOut;
+    newEntryPrice = (oldTokens * oldEntry + tokensOut * tradePrice) / totalTokens;
+  } else {
+    // First buy - entry price is the trade price
+    newEntryPrice = tradePrice;
+  }
+
   // Execute transaction
   const result = await prisma.$transaction(async (tx) => {
     // Update round pool state
@@ -124,11 +149,13 @@ export async function executeBuy(
         profile_id: profileId,
         token_balance: tokensOut,
         total_sol_in: solAmount,
-        total_sol_out: 0
+        total_sol_out: 0,
+        entry_price: newEntryPrice
       },
       update: {
         token_balance: { increment: tokensOut },
-        total_sol_in: { increment: solAmount }
+        total_sol_in: { increment: solAmount },
+        entry_price: newEntryPrice
       }
     });
 
@@ -248,6 +275,10 @@ export async function executeSell(
   const newPrice = getPrice(newPool);
   const priceMultiplier = getPriceMultiplier(newPool);
 
+  // Check if this sell closes the entire position
+  const remainingTokens = tokenBalance - tokensToSell;
+  const shouldClearEntryPrice = remainingTokens <= 0.000001; // Near-zero check for floating point
+
   // Execute transaction
   const result = await prisma.$transaction(async (tx) => {
     // Update round pool state
@@ -260,7 +291,7 @@ export async function executeSell(
       }
     });
 
-    // Update player position
+    // Update player position (reset entry_price if fully closed)
     const updatedPosition = await tx.playerPosition.update({
       where: {
         round_id_profile_id: {
@@ -270,7 +301,8 @@ export async function executeSell(
       },
       data: {
         token_balance: { decrement: tokensToSell },
-        total_sol_out: { increment: solAfterFee }
+        total_sol_out: { increment: solAfterFee },
+        entry_price: shouldClearEntryPrice ? null : undefined
       }
     });
 

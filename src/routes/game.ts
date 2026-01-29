@@ -90,6 +90,15 @@ router.get('/position/:wallet_address', async (req: Request, res: Response) => {
     const pnl = currentValue + totalOut - totalIn;
     const pnlPercent = totalIn > 0 ? (pnl / totalIn) * 100 : 0;
     
+    // Calculate unrealized PnL based on entry price
+    const entryPrice = position.entry_price ? Number(position.entry_price) : null;
+    let unrealizedPnl = 0;
+    let unrealizedPnlPercent = 0;
+    if (entryPrice && tokenBalance > 0) {
+      unrealizedPnl = (currentPrice - entryPrice) * tokenBalance;
+      unrealizedPnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    }
+    
     return res.json({
       position: {
         round_id: position.round_id,
@@ -97,14 +106,110 @@ router.get('/position/:wallet_address', async (req: Request, res: Response) => {
         total_sol_in: totalIn,
         total_sol_out: totalOut,
         current_value: currentValue,
+        entry_price: entryPrice,
+        current_price: currentPrice,
         pnl: pnl,
-        pnl_percent: pnlPercent
+        pnl_percent: pnlPercent,
+        unrealized_pnl: unrealizedPnl,
+        unrealized_pnl_percent: unrealizedPnlPercent
       }
     });
     
   } catch (error) {
     console.error('Error in /game/position:', error);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/game/pnl/:wallet_address - Get current PnL snapshot for a player
+router.get('/pnl/:wallet_address', async (req: Request, res: Response) => {
+  try {
+    const { wallet_address } = req.params;
+    
+    // Get profile
+    const profile = await prisma.profile.findUnique({
+      where: { wallet_address }
+    });
+    
+    if (!profile) {
+      return res.json({ 
+        success: false, 
+        error: 'Profile not found',
+        pnl: null 
+      });
+    }
+    
+    // Get active round
+    const activeRound = await getActiveRound();
+    if (!activeRound) {
+      return res.json({ 
+        success: true,
+        pnl: null,
+        message: 'No active round' 
+      });
+    }
+    
+    // Get position
+    const position = await getPosition(activeRound.id, profile.id);
+    if (!position) {
+      return res.json({ 
+        success: true,
+        pnl: null,
+        message: 'No position in current round' 
+      });
+    }
+    
+    const currentPrice = Number(activeRound.current_price);
+    const tokenBalance = Number(position.token_balance);
+    const totalIn = Number(position.total_sol_in);
+    const totalOut = Number(position.total_sol_out);
+    const entryPrice = position.entry_price ? Number(position.entry_price) : null;
+    
+    // Current value of tokens held
+    const currentValue = tokenBalance * currentPrice;
+    
+    // Total PnL = current value + SOL received from sells - SOL spent on buys
+    const totalPnl = currentValue + totalOut - totalIn;
+    const totalPnlPercent = totalIn > 0 ? (totalPnl / totalIn) * 100 : 0;
+    
+    // Unrealized PnL based on entry price (for open position only)
+    let unrealizedPnl = 0;
+    let unrealizedPnlPercent = 0;
+    if (entryPrice && tokenBalance > 0) {
+      unrealizedPnl = (currentPrice - entryPrice) * tokenBalance;
+      unrealizedPnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    }
+    
+    return res.json({
+      success: true,
+      pnl: {
+        round_id: activeRound.id,
+        wallet_address: wallet_address,
+        
+        // Position info
+        token_balance: tokenBalance,
+        entry_price: entryPrice,
+        current_price: currentPrice,
+        
+        // Value tracking
+        total_sol_in: totalIn,
+        total_sol_out: totalOut,
+        current_value: currentValue,
+        
+        // PnL calculations
+        total_pnl: totalPnl,
+        total_pnl_percent: totalPnlPercent,
+        unrealized_pnl: unrealizedPnl,
+        unrealized_pnl_percent: unrealizedPnlPercent,
+        
+        // Timestamps
+        timestamp: Date.now()
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error in /game/pnl:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
