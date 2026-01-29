@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
@@ -21,24 +22,27 @@ function validateUsername(username: string): { valid: boolean; error?: string } 
   return { valid: true };
 }
 
-// POST /api/auth/profile - Get or create profile by wallet_address
-router.post('/profile', async (req: Request, res: Response) => {
+// POST /api/auth/profile - Get or create profile (requires Privy auth)
+router.post('/profile', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address } = req.body;
+    const wallet_address = req.walletAddress!;
+    const privy_user_id = req.privyUserId!;
     
-    if (!wallet_address) {
-      return res.status(400).json({ error: 'wallet_address is required' });
-    }
-    
-    // Try to find existing profile
-    let profile = await prisma.profile.findUnique({
-      where: { wallet_address }
+    // Try to find existing profile by wallet or privy user id
+    let profile = await prisma.profile.findFirst({
+      where: {
+        OR: [
+          { wallet_address },
+          { privy_user_id }
+        ]
+      }
     });
     
     // Create new profile if not exists
     if (!profile) {
       profile = await prisma.profile.create({
         data: {
+          privy_user_id,
           wallet_address,
           deposited_balance: 0,
           total_wagered: 0,
@@ -46,6 +50,14 @@ router.post('/profile', async (req: Request, res: Response) => {
           games_played: 0
         }
       });
+    } else {
+      // Update privy_user_id if not set (for existing users migrating to Privy)
+      if (!profile.privy_user_id) {
+        profile = await prisma.profile.update({
+          where: { id: profile.id },
+          data: { privy_user_id }
+        });
+      }
     }
     
     return res.json({
@@ -61,13 +73,14 @@ router.post('/profile', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/auth/username - Set username for wallet
-router.post('/username', async (req: Request, res: Response) => {
+// POST /api/auth/username - Set username (requires Privy auth)
+router.post('/username', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address, username } = req.body;
+    const wallet_address = req.walletAddress!;
+    const { username } = req.body;
     
-    if (!wallet_address || !username) {
-      return res.status(400).json({ success: false, error: 'wallet_address and username are required' });
+    if (!username) {
+      return res.status(400).json({ success: false, error: 'username is required' });
     }
     
     // Validate username format

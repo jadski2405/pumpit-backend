@@ -8,18 +8,20 @@ import {
   lamportsToSol 
 } from '../lib/solana';
 import { Decimal } from '@prisma/client/runtime/library';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
-// POST /api/deposit/confirm - Confirm a deposit transaction
-router.post('/confirm', async (req: Request, res: Response) => {
+// POST /api/deposit/confirm - Confirm a deposit transaction (requires auth)
+router.post('/confirm', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address, tx_signature, amount } = req.body;
+    const wallet_address = req.walletAddress!;
+    const { tx_signature, amount } = req.body;
     
-    if (!wallet_address || !tx_signature || amount === undefined) {
+    if (!tx_signature || amount === undefined) {
       return res.status(400).json({ 
         success: false, 
-        error: 'wallet_address, tx_signature, and amount are required' 
+        error: 'tx_signature and amount are required' 
       });
     }
     
@@ -32,6 +34,7 @@ router.post('/confirm', async (req: Request, res: Response) => {
       profile = await prisma.profile.create({
         data: {
           wallet_address,
+          privy_user_id: req.privyUserId,
           deposited_balance: 0,
           total_wagered: 0,
           total_won: 0,
@@ -159,15 +162,16 @@ router.post('/confirm', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/withdraw - Withdraw SOL to user's wallet
-router.post('/', async (req: Request, res: Response) => {
+// POST /api/withdraw - Withdraw SOL to user's wallet (requires auth)
+router.post('/', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address, amount } = req.body;
+    const wallet_address = req.walletAddress!;
+    const { amount } = req.body;
     
-    if (!wallet_address || amount === undefined) {
+    if (amount === undefined) {
       return res.status(400).json({ 
         success: false, 
-        error: 'wallet_address and amount are required' 
+        error: 'amount is required' 
       });
     }
     

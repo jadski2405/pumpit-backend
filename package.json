@@ -21,6 +21,7 @@
   "license": "ISC",
   "dependencies": {
     "@prisma/client": "^5.10.0",
+    "@privy-io/node": "^0.8.0",
     "@solana/web3.js": "^1.91.0",
     "bs58": "^5.0.0",
     "cors": "^2.8.5",

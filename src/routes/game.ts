@@ -24,6 +24,7 @@ import {
   getCurrentRound
 } from '../services/roundManager';
 import { sendPositionUpdate, sendBalanceUpdate } from '../websocket/broadcast';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
@@ -213,15 +214,16 @@ router.get('/pnl/:wallet_address', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/game/trade - Execute a trade
-router.post('/trade', async (req: Request, res: Response) => {
+// POST /api/game/trade - Execute a trade (requires auth)
+router.post('/trade', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address, trade_type, sol_amount } = req.body;
+    const wallet_address = req.walletAddress!;
+    const { trade_type, sol_amount } = req.body;
     
-    if (!wallet_address || !trade_type || sol_amount === undefined) {
+    if (!trade_type || sol_amount === undefined) {
       return res.status(400).json({ 
         success: false, 
-        error: 'wallet_address, trade_type, and sol_amount are required' 
+        error: 'trade_type and sol_amount are required' 
       });
     }
     
@@ -337,14 +339,10 @@ router.post('/trade', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/game/sell-all - Sell all tokens
-router.post('/sell-all', async (req: Request, res: Response) => {
+// POST /api/game/sell-all - Sell all tokens (requires auth)
+router.post('/sell-all', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { wallet_address } = req.body;
-    
-    if (!wallet_address) {
-      return res.status(400).json({ success: false, error: 'wallet_address is required' });
-    }
+    const wallet_address = req.walletAddress!;
     
     // Get profile
     const profile = await prisma.profile.findUnique({
