@@ -175,83 +175,148 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       });
     }
     
-    if (amount <= 0) {
+    const withdrawAmount = Number(amount);
+    
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
       return res.json({ success: false, error: 'Amount must be greater than 0' });
     }
     
-    // Get profile
-    const profile = await prisma.profile.findUnique({
-      where: { wallet_address }
-    });
-    
-    if (!profile) {
-      return res.json({ success: false, error: 'Profile not found' });
-    }
-    
-    // Check balance
-    const currentBalance = Number(profile.deposited_balance);
-    if (currentBalance < amount) {
+    // Minimum withdrawal to cover transaction fees
+    const MIN_WITHDRAWAL = 0.001;
+    if (withdrawAmount < MIN_WITHDRAWAL) {
       return res.json({ 
         success: false, 
-        error: `Insufficient balance. You have ${currentBalance} SOL` 
+        error: `Minimum withdrawal is ${MIN_WITHDRAWAL} SOL` 
       });
     }
     
-    // Create pending withdrawal record
-    const withdrawal = await prisma.depositHistory.create({
-      data: {
-        profile_id: profile.id,
-        tx_type: 'withdrawal',
-        amount: amount,
-        tx_signature: 'pending',
-        status: 'pending'
-      }
-    });
-    
-    try {
-      // Transfer SOL from escrow to user
-      const tx_signature = await transferFromEscrow(wallet_address, amount);
+    // Use a transaction with row locking to prevent race conditions
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the profile row for update (prevents concurrent withdrawals)
+      const profiles = await tx.$queryRaw<Array<{
+        id: string;
+        deposited_balance: Decimal;
+      }>>`
+        SELECT id, deposited_balance 
+        FROM profile 
+        WHERE wallet_address = ${wallet_address} 
+        FOR UPDATE
+      `;
       
-      // Update profile balance
-      const updatedProfile = await prisma.profile.update({
+      if (profiles.length === 0) {
+        throw new Error('PROFILE_NOT_FOUND');
+      }
+      
+      const profile = profiles[0];
+      const currentBalance = Number(profile.deposited_balance);
+      
+      // Check if user has sufficient balance
+      if (currentBalance < withdrawAmount) {
+        throw new Error(`INSUFFICIENT_BALANCE:${currentBalance}`);
+      }
+      
+      // Deduct balance BEFORE sending SOL (safer - can refund on failure)
+      const updatedProfile = await tx.profile.update({
         where: { id: profile.id },
         data: {
           deposited_balance: {
-            decrement: amount
+            decrement: withdrawAmount
           }
         }
       });
       
-      // Update withdrawal record
+      // Create withdrawal record as pending
+      const withdrawal = await tx.depositHistory.create({
+        data: {
+          profile_id: profile.id,
+          tx_type: 'withdrawal',
+          amount: withdrawAmount,
+          tx_signature: 'pending',
+          status: 'pending'
+        }
+      });
+      
+      return { 
+        profile: updatedProfile, 
+        withdrawal,
+        previousBalance: currentBalance 
+      };
+    });
+    
+    // Now send the SOL outside of the transaction
+    // If this fails, we need to refund the balance
+    let tx_signature: string;
+    try {
+      tx_signature = await transferFromEscrow(wallet_address, withdrawAmount);
+      
+      // Update withdrawal record with successful transaction
       await prisma.depositHistory.update({
-        where: { id: withdrawal.id },
+        where: { id: result.withdrawal.id },
         data: {
           tx_signature,
           status: 'confirmed'
         }
       });
       
+      console.log(`[Withdraw] Sent ${withdrawAmount} SOL to ${wallet_address}, tx: ${tx_signature}`);
+      
       return res.json({ 
         success: true, 
         tx_signature,
-        new_balance: updatedProfile.deposited_balance.toString()
+        new_balance: result.profile.deposited_balance.toString()
       });
       
     } catch (txError) {
-      // Mark withdrawal as failed
-      await prisma.depositHistory.update({
-        where: { id: withdrawal.id },
-        data: { status: 'failed' }
-      });
+      // SOL transfer failed - refund the deducted balance
+      console.error('[Withdraw] Transfer failed, refunding balance:', txError);
       
-      console.error('Withdrawal transaction failed:', txError);
+      try {
+        await prisma.profile.update({
+          where: { id: result.profile.id },
+          data: {
+            deposited_balance: {
+              increment: withdrawAmount
+            }
+          }
+        });
+        
+        // Mark withdrawal as failed
+        await prisma.depositHistory.update({
+          where: { id: result.withdrawal.id },
+          data: { status: 'failed' }
+        });
+        
+        console.log(`[Withdraw] Refunded ${withdrawAmount} SOL to ${wallet_address} database balance`);
+        
+      } catch (refundError) {
+        // Critical: Failed to refund - log for manual intervention
+        console.error('[Withdraw] CRITICAL: Failed to refund balance after failed transfer!', {
+          wallet_address,
+          amount: withdrawAmount,
+          error: refundError
+        });
+      }
+      
       return res.json({ 
         success: false, 
-        error: 'Transaction failed. Please try again.' 
+        error: 'Transaction failed. Your balance has been refunded.' 
       });
     }
     
-  } catch (error) {
+  } catch (error: any) {
+    // Handle known errors from the transaction
+    if (error.message === 'PROFILE_NOT_FOUND') {
+      return res.json({ success: false, error: 'Profile not found' });
+    }
+    
+    if (error.message?.startsWith('INSUFFICIENT_BALANCE:')) {
+      const balance = error.message.split(':')[1];
+      return res.json({ 
+        success: false, 
+        error: `Insufficient balance. You have ${balance} SOL` 
+      });
+    }
+    
     console.error('Error in /withdraw:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
