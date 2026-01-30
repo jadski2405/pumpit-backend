@@ -28,37 +28,22 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     const wallet_address = req.walletAddress!;
     const privy_user_id = req.privyUserId!;
     
-    // Try to find existing profile by wallet or privy user id
-    let profile = await prisma.profile.findFirst({
-      where: {
-        OR: [
-          { wallet_address },
-          { privy_user_id }
-        ]
+    // Use upsert to handle race conditions
+    const profile = await prisma.profile.upsert({
+      where: { wallet_address },
+      update: {
+        // Update privy_user_id if not set (for existing users migrating to Privy)
+        privy_user_id: privy_user_id
+      },
+      create: {
+        privy_user_id,
+        wallet_address,
+        deposited_balance: 0,
+        total_wagered: 0,
+        total_won: 0,
+        games_played: 0
       }
     });
-    
-    // Create new profile if not exists
-    if (!profile) {
-      profile = await prisma.profile.create({
-        data: {
-          privy_user_id,
-          wallet_address,
-          deposited_balance: 0,
-          total_wagered: 0,
-          total_won: 0,
-          games_played: 0
-        }
-      });
-    } else {
-      // Update privy_user_id if not set (for existing users migrating to Privy)
-      if (!profile.privy_user_id) {
-        profile = await prisma.profile.update({
-          where: { id: profile.id },
-          data: { privy_user_id }
-        });
-      }
-    }
     
     return res.json({
       id: profile.id,
