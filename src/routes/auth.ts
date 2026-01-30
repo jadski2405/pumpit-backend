@@ -28,7 +28,31 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     const wallet_address = req.walletAddress!;
     const privy_user_id = req.privyUserId!;
     
-    // Use upsert to handle race conditions
+    // Check if this Privy user already has a profile with a different wallet
+    const existingPrivyProfile = await prisma.profile.findFirst({
+      where: { privy_user_id }
+    });
+
+    if (existingPrivyProfile && existingPrivyProfile.wallet_address !== wallet_address) {
+      return res.status(400).json({
+        success: false,
+        error: 'This Privy account is already linked to a different wallet'
+      });
+    }
+
+    // Check if this wallet is already linked to a different Privy user
+    const existingWalletProfile = await prisma.profile.findUnique({
+      where: { wallet_address }
+    });
+
+    if (existingWalletProfile && existingWalletProfile.privy_user_id && existingWalletProfile.privy_user_id !== privy_user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'This wallet is already linked to a different account'
+      });
+    }
+
+    // Use upsert to handle race conditions - one profile per wallet
     const profile = await prisma.profile.upsert({
       where: { wallet_address },
       update: {
@@ -46,6 +70,7 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     });
     
     return res.json({
+      success: true,
       id: profile.id,
       wallet_address: profile.wallet_address,
       username: profile.username,
@@ -54,7 +79,7 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error in /auth/profile:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
