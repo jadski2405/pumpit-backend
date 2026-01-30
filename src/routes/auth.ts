@@ -34,7 +34,8 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     });
 
     if (existingPrivyProfile) {
-      // Privy user already has a profile - return it
+      // Privy user already has a profile - return it (even if wallet is different)
+      // This prevents one Privy account from creating multiple profiles
       if (existingPrivyProfile.wallet_address !== wallet_address) {
         return res.status(400).json({
           success: false,
@@ -53,7 +54,7 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
       });
     }
 
-    // Check if this wallet already has a profile
+    // Check if this wallet already has a profile with a different Privy user
     const existingWalletProfile = await prisma.profile.findUnique({
       where: { wallet_address }
     });
@@ -67,21 +68,26 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
         });
       }
       
-      // Wallet exists but no privy_user_id or same privy_user_id - return it
-      // Don't try to update privy_user_id to avoid unique constraint issues
+      // Wallet exists but no privy_user_id - link it to this Privy user
+      const updatedProfile = await prisma.profile.update({
+        where: { wallet_address },
+        data: { privy_user_id }
+      });
+      
       return res.json({
         success: true,
-        id: existingWalletProfile.id,
-        wallet_address: existingWalletProfile.wallet_address,
-        username: existingWalletProfile.username,
-        deposited_balance: existingWalletProfile.deposited_balance.toString(),
-        needsUsername: !existingWalletProfile.username
+        id: updatedProfile.id,
+        wallet_address: updatedProfile.wallet_address,
+        username: updatedProfile.username,
+        deposited_balance: updatedProfile.deposited_balance.toString(),
+        needsUsername: !updatedProfile.username
       });
     }
 
-    // No existing profile - create new one WITHOUT privy_user_id first
+    // No existing profile - create new one
     const profile = await prisma.profile.create({
       data: {
+        privy_user_id,
         wallet_address,
         deposited_balance: 0,
         total_wagered: 0,
@@ -98,24 +104,7 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
       deposited_balance: profile.deposited_balance.toString(),
       needsUsername: !profile.username
     });
-  } catch (error: any) {
-    // Handle unique constraint errors gracefully
-    if (error?.code === 'P2002') {
-      // Race condition - profile was just created, fetch it
-      const profile = await prisma.profile.findUnique({
-        where: { wallet_address: req.walletAddress! }
-      });
-      if (profile) {
-        return res.json({
-          success: true,
-          id: profile.id,
-          wallet_address: profile.wallet_address,
-          username: profile.username,
-          deposited_balance: profile.deposited_balance.toString(),
-          needsUsername: !profile.username
-        });
-      }
-    }
+  } catch (error) {
     console.error('Error in /auth/profile:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
