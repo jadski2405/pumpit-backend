@@ -6,13 +6,20 @@ import {
   applyBuy, 
   applySell, 
   getPrice,
-  getPriceMultiplier
+  getPriceMultiplier,
+  getMultiplier,
+  getMultiplierAfterBuy,
+  calculateAverageEntry
 } from '../lib/poolEngine';
 import { getActiveRound, isRoundExpired, getPosition } from './roundService';
 
-// Trade configuration
-export const HOUSE_FEE = 0.02; // 2% fee
+// Fee configuration
+export const BUY_FEE = 0.02;  // 2% buy fee
+export const SELL_FEE = 0.02; // 2% sell fee
 export const MIN_TRADE = 0.001; // Minimum trade in SOL
+
+// House wallet receives all fees (from .env HOUSE_WALLET_ADDRESS)
+export const HOUSE_WALLET = process.env.HOUSE_WALLET_ADDRESS || '';
 
 export interface TradeResult {
   success: boolean;
@@ -23,18 +30,24 @@ export interface TradeResult {
   priceMultiplier?: number;
   newBalance?: number;
   feeAmount?: number;
+  entryMultiplier?: number;
   position?: {
     token_balance: number;
     total_sol_in: number;
     total_sol_out: number;
+    entry_price: number | null;
   };
 }
 
 /**
  * Execute a buy trade
- * @param profileId - Profile making the trade
- * @param roundId - Round to trade in
- * @param solAmount - Amount of SOL to spend (before fees)
+ * 
+ * New logic:
+ * 1. Calculate multiplier BEFORE buy
+ * 2. Apply 2% fee, add remaining to pool
+ * 3. Calculate multiplier AFTER buy  
+ * 4. User's entry = average of before/after (anti-self-profit)
+ * 5. Tokens = SOL amount (1:1 stake)
  */
 export async function executeBuy(
   profileId: string, 
@@ -78,8 +91,8 @@ export async function executeBuy(
     return { success: false, error: 'Round has ended' };
   }
 
-  // Calculate fee
-  const feeAmount = solAmount * HOUSE_FEE;
+  // Calculate 2% buy fee
+  const feeAmount = solAmount * BUY_FEE;
   const solAfterFee = solAmount - feeAmount;
 
   // Get current pool state
@@ -88,18 +101,27 @@ export async function executeBuy(
     token_supply: Number(round.pool_token_supply)
   };
 
-  // Calculate tokens out
+  // Calculate multiplier BEFORE buy
+  const multiplierBefore = getMultiplier(pool);
+
+  // Tokens = SOL stake (1:1 in new system)
   const tokensOut = calculateBuy(pool, solAfterFee);
   if (tokensOut <= 0) {
     return { success: false, error: 'Trade too small' };
   }
 
-  // Apply to pool
-  const newPool = applyBuy(pool, solAfterFee, tokensOut);
-  const newPrice = getPrice(newPool);
-  const priceMultiplier = getPriceMultiplier(newPool);
+  // Apply to pool (just adds SOL to pool)
+  const newPool = applyBuy(pool, solAfterFee);
+  
+  // Calculate multiplier AFTER buy
+  const multiplierAfter = getMultiplier(newPool);
+  const priceMultiplier = multiplierAfter;
+  const newPrice = multiplierAfter;
 
-  // Get existing position to calculate weighted average entry price
+  // Calculate user's average entry (anti-self-profit mechanism)
+  const tradeEntryMultiplier = calculateAverageEntry(multiplierBefore, multiplierAfter);
+
+  // Get existing position to calculate weighted average entry
   const existingPosition = await prisma.playerPosition.findUnique({
     where: {
       round_id_profile_id: {
@@ -109,19 +131,17 @@ export async function executeBuy(
     }
   });
 
-  // Calculate weighted average entry price
-  const tradePrice = newPrice;
+  // Calculate new weighted average entry multiplier
   let newEntryPrice: number;
-  
   if (existingPosition && Number(existingPosition.token_balance) > 0 && existingPosition.entry_price) {
-    // Weighted average: (old_tokens * old_entry + new_tokens * trade_price) / total_tokens
+    // Weighted average: (old_tokens * old_entry + new_tokens * trade_entry) / total_tokens
     const oldTokens = Number(existingPosition.token_balance);
     const oldEntry = Number(existingPosition.entry_price);
     const totalTokens = oldTokens + tokensOut;
-    newEntryPrice = (oldTokens * oldEntry + tokensOut * tradePrice) / totalTokens;
+    newEntryPrice = (oldTokens * oldEntry + tokensOut * tradeEntryMultiplier) / totalTokens;
   } else {
-    // First buy - entry price is the trade price
-    newEntryPrice = tradePrice;
+    // First buy - entry is the average multiplier
+    newEntryPrice = tradeEntryMultiplier;
   }
 
   // Execute transaction
@@ -159,7 +179,7 @@ export async function executeBuy(
       }
     });
 
-    // Deduct from profile balance
+    // Deduct from profile balance (full amount including fee)
     const updatedProfile = await tx.profile.update({
       where: { id: profileId },
       data: {
@@ -169,7 +189,7 @@ export async function executeBuy(
       }
     });
 
-    // Record trade
+    // Record trade with fee going to house
     await tx.trade.create({
       data: {
         round_id: roundId,
@@ -185,6 +205,8 @@ export async function executeBuy(
     return { position, updatedProfile };
   });
 
+  console.log(`[Trade] BUY: ${solAmount} SOL -> ${tokensOut} tokens, entry: ${newEntryPrice.toFixed(4)}x, mult: ${priceMultiplier.toFixed(4)}x`);
+
   return {
     success: true,
     tokensTraded: tokensOut,
@@ -193,27 +215,31 @@ export async function executeBuy(
     priceMultiplier,
     newBalance: Number(result.updatedProfile.deposited_balance),
     feeAmount,
+    entryMultiplier: newEntryPrice,
     position: {
       token_balance: Number(result.position.token_balance),
       total_sol_in: Number(result.position.total_sol_in),
-      total_sol_out: Number(result.position.total_sol_out)
+      total_sol_out: Number(result.position.total_sol_out),
+      entry_price: Number(result.position.entry_price)
     }
   };
 }
 
 /**
  * Execute a sell trade
- * @param profileId - Profile making the trade
- * @param roundId - Round to trade in
- * @param solAmount - Amount of SOL worth of tokens to sell (before fees)
+ * 
+ * New logic:
+ * 1. Calculate SOL out based on: tokens * (currentMultiplier / entryMultiplier)
+ * 2. Apply 2% sell fee
+ * 3. Safety: payout can never exceed pool balance
  */
 export async function executeSell(
   profileId: string, 
   roundId: string, 
-  solAmount: number
+  tokensToSell: number
 ): Promise<TradeResult> {
   // Validate minimum trade
-  if (solAmount < MIN_TRADE) {
+  if (tokensToSell < MIN_TRADE) {
     return { success: false, error: `Minimum trade is ${MIN_TRADE} SOL` };
   }
 
@@ -245,39 +271,38 @@ export async function executeSell(
     return { success: false, error: 'No tokens to sell' };
   }
 
-  // Get current pool state
-  const pool: Pool = {
-    sol_balance: Number(round.pool_sol_balance),
-    token_supply: Number(round.pool_token_supply)
-  };
-
-  // Calculate how many tokens needed for the requested SOL amount
-  const currentPrice = getPrice(pool);
-  let tokensToSell = solAmount / currentPrice;
+  // Get user's entry multiplier
+  const entryMultiplier = Number(position.entry_price) || 1;
 
   // Cap at available balance
   if (tokensToSell > tokenBalance) {
     tokensToSell = tokenBalance;
   }
 
-  // Calculate SOL out
-  const solOut = calculateSell(pool, tokensToSell);
-  if (solOut <= 0) {
-    return { success: false, error: 'Trade too small' };
+  // Get current pool state
+  const pool: Pool = {
+    sol_balance: Number(round.pool_sol_balance),
+    token_supply: Number(round.pool_token_supply)
+  };
+
+  // Calculate SOL out based on entry vs current multiplier
+  const solOutBeforeFee = calculateSell(pool, tokensToSell, entryMultiplier);
+  if (solOutBeforeFee <= 0) {
+    return { success: false, error: 'Trade too small or insufficient pool liquidity' };
   }
 
-  // Calculate fee
-  const feeAmount = solOut * HOUSE_FEE;
-  const solAfterFee = solOut - feeAmount;
+  // Apply 2% sell fee
+  const feeAmount = solOutBeforeFee * SELL_FEE;
+  const solAfterFee = solOutBeforeFee - feeAmount;
 
-  // Apply to pool
-  const newPool = applySell(pool, tokensToSell, solOut);
+  // Apply to pool (remove SOL from pool)
+  const newPool = applySell(pool, solOutBeforeFee);
   const newPrice = getPrice(newPool);
   const priceMultiplier = getPriceMultiplier(newPool);
 
   // Check if this sell closes the entire position
   const remainingTokens = tokenBalance - tokensToSell;
-  const shouldClearEntryPrice = remainingTokens <= 0.000001; // Near-zero check for floating point
+  const shouldClearEntryPrice = remainingTokens <= 0.000001;
 
   // Execute transaction
   const result = await prisma.$transaction(async (tx) => {
@@ -291,7 +316,7 @@ export async function executeSell(
       }
     });
 
-    // Update player position (reset entry_price if fully closed)
+    // Update player position
     const updatedPosition = await tx.playerPosition.update({
       where: {
         round_id_profile_id: {
@@ -306,7 +331,7 @@ export async function executeSell(
       }
     });
 
-    // Credit profile balance
+    // Credit profile balance (after fee)
     const updatedProfile = await tx.profile.update({
       where: { id: profileId },
       data: {
@@ -321,7 +346,7 @@ export async function executeSell(
         round_id: roundId,
         profile_id: profileId,
         trade_type: 'sell',
-        sol_amount: solOut,
+        sol_amount: solOutBeforeFee,
         token_amount: tokensToSell,
         price_at_trade: newPrice,
         fee_amount: feeAmount
@@ -330,6 +355,9 @@ export async function executeSell(
 
     return { position: updatedPosition, updatedProfile };
   });
+
+  const pnlRatio = getMultiplier(pool) / entryMultiplier;
+  console.log(`[Trade] SELL: ${tokensToSell} tokens -> ${solAfterFee.toFixed(4)} SOL, entry: ${entryMultiplier.toFixed(4)}x, PnL: ${((pnlRatio - 1) * 100).toFixed(2)}%`);
 
   return {
     success: true,
@@ -342,7 +370,8 @@ export async function executeSell(
     position: {
       token_balance: Number(result.position.token_balance),
       total_sol_in: Number(result.position.total_sol_in),
-      total_sol_out: Number(result.position.total_sol_out)
+      total_sol_out: Number(result.position.total_sol_out),
+      entry_price: result.position.entry_price ? Number(result.position.entry_price) : null
     }
   };
 }
@@ -364,37 +393,26 @@ export async function executeSellAll(
     return { success: false, error: 'No tokens to sell' };
   }
 
-  // Get round for price
-  const round = await prisma.gameRound.findUnique({
-    where: { id: roundId }
-  });
-
-  if (!round) {
-    return { success: false, error: 'Round not found' };
-  }
-
-  const currentPrice = Number(round.current_price);
-  const solValue = tokenBalance * currentPrice;
-
-  return executeSell(profileId, roundId, solValue);
+  return executeSell(profileId, roundId, tokenBalance);
 }
 
 /**
- * Get trade preview without executing
+ * Get buy preview without executing
  */
 export function previewBuy(pool: Pool, solAmount: number) {
-  const feeAmount = solAmount * HOUSE_FEE;
+  const feeAmount = solAmount * BUY_FEE;
   const solAfterFee = solAmount - feeAmount;
-  const tokensOut = calculateBuy(pool, solAfterFee);
-  const newPool = applyBuy(pool, solAfterFee, tokensOut);
-  const newPrice = getPrice(newPool);
-  const priceMultiplier = getPriceMultiplier(newPool);
-  const priceImpact = ((newPrice - getPrice(pool)) / getPrice(pool)) * 100;
+  const multiplierBefore = getMultiplier(pool);
+  const newPool = applyBuy(pool, solAfterFee);
+  const multiplierAfter = getMultiplier(newPool);
+  const entryMultiplier = calculateAverageEntry(multiplierBefore, multiplierAfter);
+  const priceImpact = ((multiplierAfter - multiplierBefore) / multiplierBefore) * 100;
 
   return {
-    tokensOut,
-    newPrice,
-    priceMultiplier,
+    tokensOut: solAfterFee,
+    newPrice: multiplierAfter,
+    priceMultiplier: multiplierAfter,
+    entryMultiplier,
     priceImpact,
     feeAmount
   };
@@ -403,20 +421,32 @@ export function previewBuy(pool: Pool, solAmount: number) {
 /**
  * Get sell preview without executing
  */
-export function previewSell(pool: Pool, tokensToSell: number) {
-  const solOut = calculateSell(pool, tokensToSell);
-  const feeAmount = solOut * HOUSE_FEE;
-  const solAfterFee = solOut - feeAmount;
-  const newPool = applySell(pool, tokensToSell, solOut);
-  const newPrice = getPrice(newPool);
-  const priceMultiplier = getPriceMultiplier(newPool);
-  const priceImpact = ((getPrice(pool) - newPrice) / getPrice(pool)) * 100;
+export function previewSell(pool: Pool, tokensToSell: number, entryMultiplier: number) {
+  const solOutBeforeFee = calculateSell(pool, tokensToSell, entryMultiplier);
+  const feeAmount = solOutBeforeFee * SELL_FEE;
+  const solAfterFee = solOutBeforeFee - feeAmount;
+  const newPool = applySell(pool, solOutBeforeFee);
+  const newMultiplier = getMultiplier(newPool);
+  const currentMultiplier = getMultiplier(pool);
+  const priceImpact = ((currentMultiplier - newMultiplier) / currentMultiplier) * 100;
 
   return {
     solOut: solAfterFee,
-    newPrice,
-    priceMultiplier,
+    newPrice: newMultiplier,
+    priceMultiplier: newMultiplier,
     priceImpact,
     feeAmount
   };
+}
+
+/**
+ * Calculate accumulated fees for a round (for house wallet)
+ */
+export async function getRoundFees(roundId: string): Promise<number> {
+  const trades = await prisma.trade.findMany({
+    where: { round_id: roundId },
+    select: { fee_amount: true }
+  });
+  
+  return trades.reduce((sum, t) => sum + Number(t.fee_amount), 0);
 }

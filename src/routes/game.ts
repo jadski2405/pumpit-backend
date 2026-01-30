@@ -460,10 +460,11 @@ router.get('/preview', async (req: Request, res: Response) => {
         fee_amount: preview.feeAmount
       });
     } else if (trade_type === 'sell') {
-      // For sell preview, sol_amount represents token value
-      const currentPrice = getPrice(pool);
-      const tokensToSell = amount / currentPrice;
-      const preview = previewSell(pool, tokensToSell);
+      // For sell preview, sol_amount represents tokens to sell
+      // Use current multiplier as entry (break-even assumption for preview)
+      const tokensToSell = amount;
+      const currentMultiplier = getPrice(pool);
+      const preview = previewSell(pool, tokensToSell, currentMultiplier);
       return res.json({
         trade_type: 'sell',
         tokens_in: tokensToSell,
@@ -471,7 +472,8 @@ router.get('/preview', async (req: Request, res: Response) => {
         new_price: preview.newPrice,
         price_multiplier: preview.priceMultiplier,
         price_impact: preview.priceImpact,
-        fee_amount: preview.feeAmount
+        fee_amount: preview.feeAmount,
+        note: 'Actual payout depends on your entry price'
       });
     } else {
       return res.json({ error: 'trade_type must be "buy" or "sell"' });
