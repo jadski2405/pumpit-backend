@@ -28,38 +28,65 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
     const wallet_address = req.walletAddress!;
     const privy_user_id = req.privyUserId!;
     
-    // Check if this Privy user already has a profile with a different wallet
+    // First, check if this Privy user already has a profile
     const existingPrivyProfile = await prisma.profile.findFirst({
       where: { privy_user_id }
     });
 
-    if (existingPrivyProfile && existingPrivyProfile.wallet_address !== wallet_address) {
-      return res.status(400).json({
-        success: false,
-        error: 'This Privy account is already linked to a different wallet'
+    if (existingPrivyProfile) {
+      // Privy user already has a profile - return it (even if wallet is different)
+      // This prevents one Privy account from creating multiple profiles
+      if (existingPrivyProfile.wallet_address !== wallet_address) {
+        return res.status(400).json({
+          success: false,
+          error: 'This account is already linked to a different wallet. Please use the original wallet.'
+        });
+      }
+      
+      // Same wallet, same privy user - return existing profile
+      return res.json({
+        success: true,
+        id: existingPrivyProfile.id,
+        wallet_address: existingPrivyProfile.wallet_address,
+        username: existingPrivyProfile.username,
+        deposited_balance: existingPrivyProfile.deposited_balance.toString(),
+        needsUsername: !existingPrivyProfile.username
       });
     }
 
-    // Check if this wallet is already linked to a different Privy user
+    // Check if this wallet already has a profile with a different Privy user
     const existingWalletProfile = await prisma.profile.findUnique({
       where: { wallet_address }
     });
 
-    if (existingWalletProfile && existingWalletProfile.privy_user_id && existingWalletProfile.privy_user_id !== privy_user_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'This wallet is already linked to a different account'
+    if (existingWalletProfile) {
+      if (existingWalletProfile.privy_user_id && existingWalletProfile.privy_user_id !== privy_user_id) {
+        // Wallet is linked to a different Privy account
+        return res.status(400).json({
+          success: false,
+          error: 'This wallet is already linked to a different account'
+        });
+      }
+      
+      // Wallet exists but no privy_user_id - link it to this Privy user
+      const updatedProfile = await prisma.profile.update({
+        where: { wallet_address },
+        data: { privy_user_id }
+      });
+      
+      return res.json({
+        success: true,
+        id: updatedProfile.id,
+        wallet_address: updatedProfile.wallet_address,
+        username: updatedProfile.username,
+        deposited_balance: updatedProfile.deposited_balance.toString(),
+        needsUsername: !updatedProfile.username
       });
     }
 
-    // Use upsert to handle race conditions - one profile per wallet
-    const profile = await prisma.profile.upsert({
-      where: { wallet_address },
-      update: {
-        // Update privy_user_id if not set (for existing users migrating to Privy)
-        privy_user_id: privy_user_id
-      },
-      create: {
+    // No existing profile - create new one
+    const profile = await prisma.profile.create({
+      data: {
         privy_user_id,
         wallet_address,
         deposited_balance: 0,
