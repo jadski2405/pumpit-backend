@@ -42,33 +42,62 @@ router.post('/confirm', async (req: Request, res: Response) => {
     });
     
     if (existingDeposit) {
+      // If pending, refetch balance
+      if (existingDeposit.status === 'pending') {
+        const currentProfile = await prisma.profile.findUnique({
+          where: { wallet_address }
+        });
+        return res.json({ 
+          success: true,
+          message: 'Deposit is being processed',
+          new_balance: currentProfile?.deposited_balance.toString() || '0'
+        });
+      }
       return res.json({ 
-        success: false, 
-        error: 'Transaction already processed',
+        success: true, 
+        message: 'Transaction already processed',
         new_balance: profile.deposited_balance.toString()
       });
     }
     
-    // Fetch transaction from chain
-    const transaction = await connection.getTransaction(tx_signature, {
-      maxSupportedTransactionVersion: 0
-    });
+    // Retry fetching transaction with backoff (wait for confirmation)
+    let transaction = null;
+    const maxRetries = 10;
+    const baseDelay = 1000;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      transaction = await connection.getTransaction(tx_signature, {
+        maxSupportedTransactionVersion: 0
+      });
+      
+      if (transaction) break;
+      
+      // Wait before retry (1s, 1.5s, 2s, 2.5s, etc.)
+      const delay = baseDelay + (attempt * 500);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
     
     if (!transaction) {
-      // Save as pending if not found yet
-      await prisma.depositHistory.create({
-        data: {
-          profile_id: profile.id,
-          tx_type: 'deposit',
-          amount: amount,
-          tx_signature,
-          status: 'pending'
-        }
+      // Save as pending (check if not already exists)
+      const existingPending = await prisma.depositHistory.findFirst({
+        where: { tx_signature }
       });
+      
+      if (!existingPending) {
+        await prisma.depositHistory.create({
+          data: {
+            profile_id: profile.id,
+            tx_type: 'deposit',
+            amount: amount,
+            tx_signature,
+            status: 'pending'
+          }
+        });
+      }
       
       return res.json({ 
         success: false, 
-        error: 'Transaction not found on chain yet. Please wait for confirmation.' 
+        error: 'Transaction not confirmed yet. Please wait a moment and refresh.' 
       });
     }
     
