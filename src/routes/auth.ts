@@ -33,25 +33,11 @@ router.post('/profile', async (req: Request, res: Response) => {
       });
     }
 
-    // Check if wallet already has a profile
-    let profile = await prisma.profile.findUnique({
-      where: { wallet_address }
-    });
-
-    if (profile) {
-      return res.json({
-        success: true,
-        id: profile.id,
-        wallet_address: profile.wallet_address,
-        username: profile.username,
-        deposited_balance: profile.deposited_balance.toString(),
-        needsUsername: !profile.username
-      });
-    }
-
-    // No existing profile - create new one
-    profile = await prisma.profile.create({
-      data: {
+    // Use upsert to avoid race conditions
+    const profile = await prisma.profile.upsert({
+      where: { wallet_address },
+      update: {},
+      create: {
         wallet_address,
         deposited_balance: 0,
         total_wagered: 0,
@@ -59,14 +45,14 @@ router.post('/profile', async (req: Request, res: Response) => {
         games_played: 0
       }
     });
-    
+
     return res.json({
       success: true,
       id: profile.id,
       wallet_address: profile.wallet_address,
       username: profile.username,
       deposited_balance: profile.deposited_balance.toString(),
-      needsUsername: true
+      needsUsername: !profile.username
     });
     
   } catch (error) {

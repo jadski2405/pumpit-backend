@@ -23,22 +23,18 @@ router.post('/confirm', async (req: Request, res: Response) => {
       });
     }
     
-    // Get or create profile
-    let profile = await prisma.profile.findUnique({
-      where: { wallet_address }
+    // Use upsert to avoid race conditions
+    const profile = await prisma.profile.upsert({
+      where: { wallet_address },
+      update: {},
+      create: {
+        wallet_address,
+        deposited_balance: 0,
+        total_wagered: 0,
+        total_won: 0,
+        games_played: 0
+      }
     });
-    
-    if (!profile) {
-      profile = await prisma.profile.create({
-        data: {
-          wallet_address,
-          deposited_balance: 0,
-          total_wagered: 0,
-          total_won: 0,
-          games_played: 0
-        }
-      });
-    }
     
     // Check if this transaction was already processed
     const existingDeposit = await prisma.depositHistory.findFirst({
