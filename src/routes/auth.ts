@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
-import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
@@ -22,72 +21,37 @@ function validateUsername(username: string): { valid: boolean; error?: string } 
   return { valid: true };
 }
 
-// POST /api/auth/profile - Get or create profile (requires Privy auth)
-router.post('/profile', requireAuth, async (req: Request, res: Response) => {
+// POST /api/auth/profile - Get or create profile (no auth required)
+router.post('/profile', async (req: Request, res: Response) => {
   try {
-    const wallet_address = req.walletAddress!;
-    const privy_user_id = req.privyUserId!;
+    const { wallet_address } = req.body;
     
-    // First, check if this Privy user already has a profile
-    const existingPrivyProfile = await prisma.profile.findFirst({
-      where: { privy_user_id }
-    });
-
-    if (existingPrivyProfile) {
-      // Privy user already has a profile - return it (even if wallet is different)
-      // This prevents one Privy account from creating multiple profiles
-      if (existingPrivyProfile.wallet_address !== wallet_address) {
-        return res.status(400).json({
-          success: false,
-          error: 'This account is already linked to a different wallet. Please use the original wallet.'
-        });
-      }
-      
-      // Same wallet, same privy user - return existing profile
-      return res.json({
-        success: true,
-        id: existingPrivyProfile.id,
-        wallet_address: existingPrivyProfile.wallet_address,
-        username: existingPrivyProfile.username,
-        deposited_balance: existingPrivyProfile.deposited_balance.toString(),
-        needsUsername: !existingPrivyProfile.username
+    if (!wallet_address) {
+      return res.status(400).json({
+        success: false,
+        error: 'wallet_address is required'
       });
     }
 
-    // Check if this wallet already has a profile with a different Privy user
-    const existingWalletProfile = await prisma.profile.findUnique({
+    // Check if wallet already has a profile
+    let profile = await prisma.profile.findUnique({
       where: { wallet_address }
     });
 
-    if (existingWalletProfile) {
-      if (existingWalletProfile.privy_user_id && existingWalletProfile.privy_user_id !== privy_user_id) {
-        // Wallet is linked to a different Privy account
-        return res.status(400).json({
-          success: false,
-          error: 'This wallet is already linked to a different account'
-        });
-      }
-      
-      // Wallet exists but no privy_user_id - link it to this Privy user
-      const updatedProfile = await prisma.profile.update({
-        where: { wallet_address },
-        data: { privy_user_id }
-      });
-      
+    if (profile) {
       return res.json({
         success: true,
-        id: updatedProfile.id,
-        wallet_address: updatedProfile.wallet_address,
-        username: updatedProfile.username,
-        deposited_balance: updatedProfile.deposited_balance.toString(),
-        needsUsername: !updatedProfile.username
+        id: profile.id,
+        wallet_address: profile.wallet_address,
+        username: profile.username,
+        deposited_balance: profile.deposited_balance.toString(),
+        needsUsername: !profile.username
       });
     }
 
     // No existing profile - create new one
-    const profile = await prisma.profile.create({
+    profile = await prisma.profile.create({
       data: {
-        privy_user_id,
         wallet_address,
         deposited_balance: 0,
         total_wagered: 0,
@@ -102,22 +66,22 @@ router.post('/profile', requireAuth, async (req: Request, res: Response) => {
       wallet_address: profile.wallet_address,
       username: profile.username,
       deposited_balance: profile.deposited_balance.toString(),
-      needsUsername: !profile.username
+      needsUsername: true
     });
+    
   } catch (error) {
     console.error('Error in /auth/profile:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-// POST /api/auth/username - Set username (requires Privy auth)
-router.post('/username', requireAuth, async (req: Request, res: Response) => {
+// POST /api/auth/username - Set username (no auth required)
+router.post('/username', async (req: Request, res: Response) => {
   try {
-    const wallet_address = req.walletAddress!;
-    const { username } = req.body;
+    const { wallet_address, username } = req.body;
     
-    if (!username) {
-      return res.status(400).json({ success: false, error: 'username is required' });
+    if (!wallet_address || !username) {
+      return res.status(400).json({ success: false, error: 'wallet_address and username are required' });
     }
     
     // Validate username format

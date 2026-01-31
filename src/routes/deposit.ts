@@ -8,20 +8,18 @@ import {
   lamportsToSol 
 } from '../lib/solana';
 import { Decimal } from '@prisma/client/runtime/library';
-import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
-// POST /api/deposit/confirm - Confirm a deposit transaction (requires auth)
-router.post('/confirm', requireAuth, async (req: Request, res: Response) => {
+// POST /api/deposit/confirm - Confirm a deposit transaction (no auth - tx proves ownership)
+router.post('/confirm', async (req: Request, res: Response) => {
   try {
-    const wallet_address = req.walletAddress!;
-    const { tx_signature, amount } = req.body;
+    const { wallet_address, tx_signature, amount } = req.body;
     
-    if (!tx_signature || amount === undefined) {
+    if (!wallet_address || !tx_signature || amount === undefined) {
       return res.status(400).json({ 
         success: false, 
-        error: 'tx_signature and amount are required' 
+        error: 'wallet_address, tx_signature and amount are required' 
       });
     }
     
@@ -34,7 +32,6 @@ router.post('/confirm', requireAuth, async (req: Request, res: Response) => {
       profile = await prisma.profile.create({
         data: {
           wallet_address,
-          privy_user_id: req.privyUserId,
           deposited_balance: 0,
           total_wagered: 0,
           total_won: 0,
@@ -102,6 +99,15 @@ router.post('/confirm', requireAuth, async (req: Request, res: Response) => {
     const preBalances = transaction.meta.preBalances;
     const postBalances = transaction.meta.postBalances;
     
+    // Verify sender (accountKeys[0] is the fee payer/sender) matches wallet_address
+    const senderPubkey = accountKeys.get(0);
+    if (!senderPubkey || senderPubkey.toBase58() !== wallet_address) {
+      return res.json({ 
+        success: false, 
+        error: 'Transaction sender does not match wallet_address' 
+      });
+    }
+    
     // Find escrow account index
     let escrowIndex = -1;
     for (let i = 0; i < accountKeys.length; i++) {
@@ -162,16 +168,15 @@ router.post('/confirm', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/withdraw - Withdraw SOL to user's wallet (requires auth)
-router.post('/', requireAuth, async (req: Request, res: Response) => {
+// POST /api/withdraw - Withdraw SOL to user's wallet (no auth - funds go TO the wallet)
+router.post('/', async (req: Request, res: Response) => {
   try {
-    const wallet_address = req.walletAddress!;
-    const { amount } = req.body;
+    const { wallet_address, amount } = req.body;
     
-    if (amount === undefined) {
+    if (!wallet_address || amount === undefined) {
       return res.status(400).json({ 
         success: false, 
-        error: 'amount is required' 
+        error: 'wallet_address and amount are required' 
       });
     }
     
